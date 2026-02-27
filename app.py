@@ -1,348 +1,405 @@
-# app.py
-# -*- coding: utf-8 -*-
-
-import re
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import streamlit as st
+import plotly.graph_objects as go
+from datetime import datetime
 
-
-# =========================
+# -----------------------------
 # Page config
-# =========================
+# -----------------------------
 st.set_page_config(
-    page_title="Investment Mix App",
-    page_icon="📊",
+    page_title="התאמת מסלולי השקעה – קרנות השתלמות",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# =========================
-# Global CSS (RTL + nice UI)
-# =========================
+# -----------------------------
+# RTL + UI CSS
+# -----------------------------
 st.markdown(
     """
-<style>
-/* App base */
-.block-container { padding-top: 2rem; padding-bottom: 2.5rem; max-width: 1200px; }
-html, body, [class*="css"] { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Noto Sans Hebrew", "Heebo", sans-serif; }
-
-/* RTL helpers */
-.rtl { direction: rtl; text-align: right; }
-.rtl * { direction: rtl; text-align: right; }
-
-/* Header */
-.hero {
-  border: 1px solid rgba(255,255,255,0.12);
-  background: linear-gradient(135deg, rgba(60,120,255,0.18), rgba(0,0,0,0));
-  padding: 18px 18px;
-  border-radius: 16px;
-  margin-bottom: 14px;
-}
-.hero h1 { margin: 0; font-size: 28px; }
-.hero p  { margin: 6px 0 0 0; opacity: 0.85; }
-
-/* Cards */
-.card {
-  border: 1px solid rgba(255,255,255,0.12);
-  background: rgba(255,255,255,0.04);
-  border-radius: 16px;
-  padding: 14px 14px;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.14);
-}
-.card h3 { margin: 0 0 6px 0; font-size: 18px; }
-.muted { opacity: 0.8; font-size: 13px; }
-.kgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
-.k {
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.03);
-  border-radius: 12px;
-  padding: 10px 10px;
-}
-.k .lab { font-size: 12px; opacity: 0.75; }
-.k .val { font-size: 16px; font-weight: 700; margin-top: 2px; }
-
-/* Table */
-.dataframe { direction: rtl; }
-
-/* Sidebar */
-section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
-</style>
-""",
+    <style>
+      html, body, [class*="css"]  { direction: rtl; }
+      .block-container { padding-top: 2rem; max-width: 1250px; }
+      .title-wrap{
+        background: linear-gradient(135deg, rgba(70,120,255,.10), rgba(120,70,255,.08));
+        border: 1px solid rgba(0,0,0,.06);
+        padding: 22px 22px;
+        border-radius: 18px;
+        margin-bottom: 18px;
+      }
+      .subtitle{ color: rgba(0,0,0,.65); margin-top: 6px; }
+      .card{
+        border: 1px solid rgba(0,0,0,.08);
+        background: rgba(255,255,255,.78);
+        border-radius: 16px;
+        padding: 14px 14px;
+        box-shadow: 0 8px 20px rgba(0,0,0,.04);
+      }
+      .card h3{ margin: 0 0 10px 0; font-size: 1.05rem; }
+      .pill{
+        display:inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(0,0,0,.08);
+        background: rgba(0,0,0,.03);
+        font-size: .85rem;
+        margin-left: 6px;
+        margin-top: 4px;
+      }
+      .muted{ color: rgba(0,0,0,.60); font-size: .9rem; }
+      .kpi{
+        display:flex;
+        justify-content: space-between;
+        border-top: 1px dashed rgba(0,0,0,.12);
+        padding-top: 8px;
+        margin-top: 8px;
+      }
+      .kpi .lab{ color: rgba(0,0,0,.65); }
+      .kpi .val{ font-weight: 700; }
+      .small{ font-size: .85rem; color: rgba(0,0,0,.60); }
+      .section{
+        border: 1px solid rgba(0,0,0,.06);
+        background: rgba(255,255,255,.65);
+        border-radius: 16px;
+        padding: 14px 14px;
+        margin-top: 12px;
+      }
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
-
-# =========================
-# Utilities
-# =========================
-def _norm_col(s: str) -> str:
-    """
-    Normalize Hebrew column names to match even if there are different quote marks:
-    - removes spaces and punctuation
-    - normalizes geresh / gershayim variants
-    """
-    if s is None:
-        return ""
-    s = str(s)
-
-    # Normalize quote marks / apostrophes commonly found in Hebrew text
-    s = s.replace("׳", "'").replace("״", '"').replace("`", "'").replace("´", "'")
-    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-
-    # Remove whitespace
-    s = re.sub(r"\s+", "", s)
-
-    # Remove punctuation except letters/numbers (keeps Hebrew)
-    s = re.sub(r"[^\w\u0590-\u05FF]", "", s)
-
-    return s.lower()
-
-
-def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    """
-    Find a column in df that matches any of candidates after normalization.
-    """
-    norm_map = {_norm_col(c): c for c in df.columns}
-    for cand in candidates:
-        key = _norm_col(cand)
-        if key in norm_map:
-            return norm_map[key]
-    return None
-
-
-@st.cache_data(show_spinner=False)
-def load_data_from_excel(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path)
-    # drop fully empty rows
-    df = df.dropna(how="all").copy()
-    return df
-
-
-def pct(x) -> str:
-    try:
-        return f"{float(x):.0f}%"
-    except Exception:
-        return str(x)
-
-
-def safe_num(x, default=np.nan) -> float:
-    try:
-        if pd.isna(x):
-            return default
-        return float(x)
-    except Exception:
-        return default
-
-
-def build_card_html(row: pd.Series, cols: dict[str, str]) -> str:
-    # cols keys: rank, kupa_a, mishkal_a, kupa_b, mishkal_b, yatro, moniot, lo_sachir, matach
-    rank = row.get(cols["rank"], "")
-    kupa_a = row.get(cols["kupa_a"], "")
-    mishkal_a = row.get(cols["mishkal_a"], "")
-    kupa_b = row.get(cols["kupa_b"], "")
-    mishkal_b = row.get(cols["mishkal_b"], "")
-
-    yatro = row.get(cols["yatro"], "")
-    moniot = row.get(cols["moniot"], "")
-    lo_sachir = row.get(cols["lo_sachir"], "")
-    matach = row.get(cols["matach"], "")
-
-    title = f"חלופה {rank}"
-    line1 = f"{kupa_a} · {mishkal_a}"
-    line2 = f"{kupa_b} · {mishkal_b}"
-
-    return f"""
-<div class="card rtl">
-  <h3>{title}</h3>
-  <div class="muted">{line1}<br/>{line2}</div>
-  <div class="kgrid">
-    <div class="k"><div class="lab">יתרה</div><div class="val">{yatro}</div></div>
-    <div class="k"><div class="lab">מניות</div><div class="val">{moniot}</div></div>
-    <div class="k"><div class="lab">לא סחיר</div><div class="val">{lo_sachir}</div></div>
-    <div class="k"><div class="lab">מט״ח</div><div class="val">{matach}</div></div>
-  </div>
-</div>
-"""
-
-
-# =========================
-# Header
-# =========================
-st.markdown(
-    """
-<div class="hero rtl">
-  <h1>כלי התאמת מסלולי השקעה בקרנות השתלמות</h1>
-  <p>השווה חלופות לפי קירבה ליעד חשיפה (מניות / לא סחיר / מט״ח), ובחר את 3 הקרובות ביותר.</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# =========================
-# Data source
-# =========================
-DEFAULT_FILE = "data.xlsx"
-data_path = None
-
-# If data.xlsx exists in repo – use it. Otherwise allow upload.
-if Path(DEFAULT_FILE).exists():
-    data_path = DEFAULT_FILE
-else:
-    st.info("לא נמצא data.xlsx בריפו. אפשר להעלות כאן קובץ אקסל במקום.")
-    up = st.file_uploader("העלה קובץ Excel", type=["xlsx"])
-    if up is not None:
-        data_path = up
-
-if data_path is None:
-    st.stop()
-
-try:
-    df = load_data_from_excel(data_path)
-except Exception as e:
-    st.error(f"שגיאה בקריאת הקובץ: {e}")
-    st.stop()
-
-if df.empty:
-    st.warning("הקובץ נטען אבל לא נמצאו נתונים.")
-    st.stop()
-
-# =========================
-# Column mapping (robust to Hebrew quotes)
-# =========================
-# Try to locate columns even if they appear with geresh variants etc.
-cols = {}
-
-cols["rank"] = find_col(df, ["דירוג", "דירוג חלופה", "rank", "rating"])  # must exist
-cols["kupa_a"] = find_col(df, ["א קופה", "קופה א", "א׳ קופה", "קופה א׳"])
-cols["mishkal_a"] = find_col(df, ["א משקל", "משקל א", "א׳ משקל", "משקל א׳"])
-cols["kupa_b"] = find_col(df, ["ב קופה", "קופה ב", "ב׳ קופה", "קופה ב׳"])
-cols["mishkal_b"] = find_col(df, ["ב משקל", "משקל ב", "ב׳ משקל", "משקל ב׳"])
-
-# Exposures / metrics
-cols["yatro"] = find_col(df, ["יתרה", "יתרה₪", "יתרה ש״ח", "balance"])
-cols["moniot"] = find_col(df, ["מניות", "% מניות", "אחוז מניות"])
-cols["lo_sachir"] = find_col(df, ["לא סחיר", "% לא סחיר", "אלטרנטיבי", "illiquid"])
-cols["matach"] = find_col(df, ["מט\"ח", "מט״ח", "% מט\"ח", "% מט״ח", "fx"])
-
-missing = [k for k, v in cols.items() if v is None]
-if missing:
-    st.error(
-        "חסרות עמודות בקובץ. חסר לי: "
-        + ", ".join(missing)
-        + "\n\nטיפ: בדוק את שמות העמודות בקובץ (שורה ראשונה) או הוסף זמנית `st.write(df.columns)`."
-    )
-    st.stop()
-
-# =========================
-# Sidebar controls
-# =========================
-with st.sidebar:
-    st.markdown('<div class="rtl">', unsafe_allow_html=True)
-    st.subheader("הגדרות יעד", anchor=False)
-
-    target_equity = st.slider("יעד מניות (%)", 0, 100, 60, 1)
-    target_illiquid = st.slider("יעד לא סחיר (%)", 0, 100, 10, 1)
-    target_fx = st.slider('יעד מט״ח (%)', 0, 100, 30, 1)
-
-    st.divider()
-
-    st.subheader("משקולות", anchor=False)
-    w_equity = st.slider("משקל מניות", 0.0, 5.0, 2.0, 0.1)
-    w_illiquid = st.slider("משקל לא סחיר", 0.0, 5.0, 1.5, 0.1)
-    w_fx = st.slider('משקל מט״ח', 0.0, 5.0, 1.0, 0.1)
-
-    st.caption("הציון הוא מרחק משוקלל מהיעד: נמוך יותר = קרוב יותר.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# =========================
-# Compute distance score
-# =========================
-work = df.copy()
-
-# Ensure numeric where needed
-work["_equity"] = pd.to_numeric(work[cols["moniot"]], errors="coerce")
-work["_illiquid"] = pd.to_numeric(work[cols["lo_sachir"]], errors="coerce")
-work["_fx"] = pd.to_numeric(work[cols["matach"]], errors="coerce")
-
-# If values are like "35%" – try strip
-for c in ["_equity", "_illiquid", "_fx"]:
-    if work[c].dtype == object:
-        work[c] = work[c].astype(str).str.replace("%", "", regex=False)
-        work[c] = pd.to_numeric(work[c], errors="coerce")
-
-# Distance
-work["_dist"] = (
-    w_equity * (work["_equity"] - target_equity).abs()
-    + w_illiquid * (work["_illiquid"] - target_illiquid).abs()
-    + w_fx * (work["_fx"] - target_fx).abs()
-)
-
-# Sort best
-best = work.sort_values("_dist", ascending=True).head(3).copy()
-
-# Pretty values in cards (if numeric)
-def fmt_val(x):
+# -----------------------------
+# Helpers
+# -----------------------------
+def pct(x):
     if pd.isna(x):
         return "—"
-    # if looks like percent
-    try:
-        return f"{float(x):.0f}%"
-    except Exception:
-        return str(x)
+    return f"{float(x):.2f}%"
 
-best_card = best.copy()
-best_card[cols["moniot"]] = best_card["_equity"].apply(fmt_val)
-best_card[cols["lo_sachir"]] = best_card["_illiquid"].apply(fmt_val)
-best_card[cols["matach"]] = best_card["_fx"].apply(fmt_val)
+def make_radar(title, target_dict, row_dict, labels_order):
+    t_vals = [target_dict[k] for k in labels_order] + [target_dict[labels_order[0]]]
+    r_vals = [row_dict[k] for k in labels_order] + [row_dict[labels_order[0]]]
+    theta = labels_order + [labels_order[0]]
 
-# =========================
-# Main layout
-# =========================
-left, right = st.columns([1.15, 0.85], vertical_alignment="top")
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=t_vals, theta=theta, fill='toself', name='יעד'))
+    fig.add_trace(go.Scatterpolar(r=r_vals, theta=theta, fill='toself', name='מסלול'))
+    fig.update_layout(
+        title=title,
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+        showlegend=True,
+        margin=dict(l=30, r=30, t=50, b=20),
+    )
+    return fig
 
-with left:
-    st.markdown('<div class="rtl">', unsafe_allow_html=True)
-    st.subheader("3 החלופות המובילות", anchor=False)
+def ensure_state():
+    if "scenarios" not in st.session_state:
+        st.session_state["scenarios"] = {}  # name -> dict
+    if "active_scenario" not in st.session_state:
+        st.session_state["active_scenario"] = None
 
-    c1, c2, c3 = st.columns(3, vertical_alignment="top")
-    cards = [c1, c2, c3]
+def scenario_payload(target_equity, target_alt, target_fx, w_equity, w_alt, w_fx, w_sharpe):
+    return {
+        "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "target": {"מניות": target_equity, "אלטרנטיבי": target_alt, "מט\"ח": target_fx},
+        "weights": {
+            "w_equity": w_equity,
+            "w_alt": w_alt,
+            "w_fx": w_fx,
+            "w_sharpe": w_sharpe,
+        },
+    }
 
-    for i, (_, r) in enumerate(best_card.iterrows()):
-        html = build_card_html(r, cols)
-        with cards[i]:
-            st.markdown(html, unsafe_allow_html=True)
+# -----------------------------
+# Header
+# -----------------------------
+st.markdown(
+    """
+    <div class="title-wrap">
+      <h1 style="margin:0;">כלי התאמת מסלולי השקעה בקרנות השתלמות</h1>
+      <div class="subtitle">השוואת מסלולים לפי חשיפות, בחירת הקרובים ביותר ליעד, פילטרים ושמירת תרחישים.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+# -----------------------------
+# Load data
+# -----------------------------
+@st.cache_data
+def load_data(path="data.xlsx"):
+    df = pd.read_excel(path)
+    return df
 
-with right:
-    st.markdown('<div class="rtl">', unsafe_allow_html=True)
-    st.subheader("טבלת השוואה", anchor=False)
+df = load_data("data.xlsx")
 
-    # Build a compact comparison table
-    show_cols = [
-        cols["rank"],
-        cols["kupa_a"],
-        cols["mishkal_a"],
-        cols["kupa_b"],
-        cols["mishkal_b"],
-        cols["yatro"],
-        cols["moniot"],
-        cols["lo_sachir"],
-        cols["matach"],
-    ]
+# Expect structure:
+# Col A = "פרמטר"
+# Col B.. = bodies
+if df.shape[1] < 2 or df.shape[0] < 2:
+    st.error("הקובץ data.xlsx לא נראה תקין (צריך עמודת 'פרמטר' ועוד עמודות גופים).")
+    st.stop()
 
-    out = best_card[show_cols].copy()
+param_col = df.columns[0]
+data = df.iloc[:, 1:].copy()
+data.columns = df.columns[1:]
 
-    # Try format weights if numeric
-    for wcol in [cols["mishkal_a"], cols["mishkal_b"]]:
-        out[wcol] = out[wcol].apply(lambda x: pct(x) if str(x).strip().replace(".", "", 1).isdigit() else x)
+# Based on your screenshot order (rows):
+needed = {
+    "מניות": 0,
+    "אלטרנטיבי": 1,
+    "שארפ": 2,
+    "נכסים סחירים": 3,
+    "נכסים בארץ": 4,
+    'מט"ח': 5,
+}
+missing_rows = [k for k, idx in needed.items() if idx >= len(df)]
+if missing_rows:
+    st.error(f"חסרות שורות בקובץ עבור: {', '.join(missing_rows)}")
+    st.stop()
 
-    st.dataframe(out, use_container_width=True, hide_index=True)
+rows = []
+for body in data.columns:
+    rows.append({
+        "גוף": str(body),
+        "מניות": float(data[body].iloc[needed["מניות"]]),
+        "אלטרנטיבי": float(data[body].iloc[needed["אלטרנטיבי"]]),
+        "שארפ": float(data[body].iloc[needed["שארפ"]]),
+        "נכסים סחירים": float(data[body].iloc[needed["נכסים סחירים"]]),
+        "נכסים בארץ": float(data[body].iloc[needed["נכסים בארץ"]]),
+        'מט"ח': float(data[body].iloc[needed['מט"ח']]),
+    })
 
-    with st.expander("הצג את כל הנתונים (לבדיקה)"):
-        st.dataframe(work, use_container_width=True)
+df2_base = pd.DataFrame(rows)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+# -----------------------------
+# Sidebar: targets, weights, filters, scenarios
+# -----------------------------
+ensure_state()
+st.sidebar.header("הגדרות")
+
+with st.sidebar.expander("יעדי חשיפה (%)", expanded=True):
+    target_equity = st.slider("מניות", 0, 100, 50, 1)
+    target_alt = st.slider("אלטרנטיבי", 0, 100, 30, 1)
+    target_fx = st.slider('מט"ח', 0, 100, 20, 1)
+
+with st.sidebar.expander("משקולות (חשיבות)", expanded=True):
+    w_equity = st.slider("משקל מניות", 0.0, 5.0, 1.0, 0.1)
+    w_alt = st.slider("משקל אלטרנטיבי", 0.0, 5.0, 1.0, 0.1)
+    w_fx = st.slider('משקל מט"ח', 0.0, 5.0, 1.0, 0.1)
+    w_sharpe = st.slider("משקל שארפ (עדיף גבוה)", 0.0, 5.0, 0.5, 0.1)
+    st.caption("שארפ עובד כ״עדיף גבוה״: ככל שהוא גבוה יותר, הציון משתפר.")
+
+with st.sidebar.expander("פילטרים", expanded=False):
+    search = st.text_input("חיפוש גוף (חלק מהשם)", value="")
+    min_sharpe = st.slider("שארפ מינימלי", 0.0, 3.0, 0.0, 0.01)
+    min_liquid = st.slider("נכסים סחירים מינימום (%)", 0.0, 100.0, 0.0, 0.5)
+    min_israel = st.slider("נכסים בארץ מינימום (%)", 0.0, 100.0, 0.0, 0.5)
+
+with st.sidebar.expander("תרחישים: שמירה והשוואה", expanded=False):
+    # Save
+    name = st.text_input("שם תרחיש לשמירה", value="")
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("שמור תרחיש", use_container_width=True):
+            if not name.strip():
+                st.warning("תן שם לתרחיש.")
+            else:
+                st.session_state["scenarios"][name.strip()] = scenario_payload(
+                    target_equity, target_alt, target_fx, w_equity, w_alt, w_fx, w_sharpe
+                )
+                st.session_state["active_scenario"] = name.strip()
+                st.success("נשמר.")
+
+    # Load/Delete
+    scenarios = list(st.session_state["scenarios"].keys())
+    if scenarios:
+        chosen = st.selectbox("תרחיש פעיל", options=scenarios, index=scenarios.index(st.session_state["active_scenario"]) if st.session_state["active_scenario"] in scenarios else 0)
+        st.session_state["active_scenario"] = chosen
+
+        payload = st.session_state["scenarios"].get(chosen)
+        if payload:
+            st.caption(f"נוצר: {payload.get('created','')}")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("טען תרחיש לערכים", use_container_width=True):
+                    t = payload["target"]
+                    w = payload["weights"]
+                    # Set sliders by rerun with session state keys? Streamlit sliders don't accept direct set unless key provided.
+                    # So we show a message with the values to copy quickly:
+                    st.info(
+                        f"ערכי תרחיש:\n"
+                        f"מניות={t['מניות']}, אלטרנטיבי={t['אלטרנטיבי']}, מט\"ח={t['מט\"ח']}\n"
+                        f"משקולות: מניות={w['w_equity']}, אלטרנטיבי={w['w_alt']}, מט\"ח={w['w_fx']}, שארפ={w['w_sharpe']}"
+                    )
+            with c2:
+                if st.button("מחק תרחיש", use_container_width=True):
+                    st.session_state["scenarios"].pop(chosen, None)
+                    st.session_state["active_scenario"] = None
+                    st.success("נמחק.")
+    else:
+        st.caption("עדיין אין תרחישים שמורים.")
+
+target = {"מניות": target_equity, "אלטרנטיבי": target_alt, 'מט"ח': target_fx}
+
+# -----------------------------
+# Apply filters
+# -----------------------------
+df2 = df2_base.copy()
+if search.strip():
+    df2 = df2[df2["גוף"].str.contains(search.strip(), case=False, na=False)]
+df2 = df2[df2["שארפ"] >= min_sharpe]
+df2 = df2[df2["נכסים סחירים"] >= min_liquid]
+df2 = df2[df2["נכסים בארץ"] >= min_israel]
+
+if df2.empty:
+    st.warning("אין תוצאות אחרי הפילטרים. נסה להקל על תנאי הסינון.")
+    st.stop()
+
+# -----------------------------
+# Scoring
+# -----------------------------
+df2["מרחק מניות"] = (df2["מניות"] - target_equity).abs()
+df2["מרחק אלטרנטיבי"] = (df2["אלטרנטיבי"] - target_alt).abs()
+df2['מרחק מט"ח'] = (df2['מט"ח'] - target_fx).abs()
+
+sh_ref = float(df2["שארפ"].max()) if len(df2) else 1.0
+df2["קנס שארפ"] = (sh_ref - df2["שארפ"]).clip(lower=0)
+
+df2["ציון"] = (
+    w_equity * df2["מרחק מניות"]
+    + w_alt * df2["מרחק אלטרנטיבי"]
+    + w_fx * df2['מרחק מט"ח']
+    + w_sharpe * df2["קנס שארפ"] * 10.0
+)
+
+best = df2.sort_values("ציון").head(3).reset_index(drop=True)
+
+# -----------------------------
+# Top 3 cards
+# -----------------------------
+st.subheader("3 המסלולים הקרובים ביותר")
+
+c1, c2, c3 = st.columns(3)
+
+def render_card(col, r, idx):
+    with col:
+        st.markdown(
+            f"""
+            <div class="card">
+              <h3>#{idx+1} — {r['גוף']}</h3>
+              <div class="muted">
+                <span class="pill">ציון: {r['ציון']:.2f}</span>
+                <span class="pill">שארפ: {r['שארפ']:.2f}</span>
+              </div>
+
+              <div class="kpi"><div class="lab">מניות</div><div class="val">{pct(r['מניות'])}</div></div>
+              <div class="kpi"><div class="lab">אלטרנטיבי</div><div class="val">{pct(r['אלטרנטיבי'])}</div></div>
+              <div class="kpi"><div class="lab">מט"ח</div><div class="val">{pct(r['מט"ח'])}</div></div>
+
+              <div class="small" style="margin-top:10px;">
+                סטיות מהיעד: מניות {r['מרחק מניות']:.1f} | אלטרנטיבי {r['מרחק אלטרנטיבי']:.1f} | מט"ח {r['מרחק מט\"ח']:.1f}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+if len(best) > 0: render_card(c1, best.iloc[0], 0)
+if len(best) > 1: render_card(c2, best.iloc[1], 1)
+if len(best) > 2: render_card(c3, best.iloc[2], 2)
+
+st.divider()
+
+# -----------------------------
+# Full table
+# -----------------------------
+st.subheader("טבלת כל המסלולים (ממוינת לפי התאמה)")
+
+show_cols = ["גוף", "ציון", "מניות", "אלטרנטיבי", 'מט"ח', "שארפ", "נכסים סחירים", "נכסים בארץ"]
+tbl = df2.sort_values("ציון")[show_cols].copy()
+
+tbl_disp = tbl.copy()
+for col in ["מניות", "אלטרנטיבי", 'מט"ח', "נכסים סחירים", "נכסים בארץ"]:
+    tbl_disp[col] = tbl_disp[col].map(lambda x: f"{x:.2f}%")
+tbl_disp["ציון"] = tbl_disp["ציון"].map(lambda x: f"{x:.2f}")
+tbl_disp["שארפ"] = tbl_disp["שארפ"].map(lambda x: f"{x:.2f}")
+
+st.dataframe(tbl_disp, use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# Radar charts
+# -----------------------------
+st.subheader("גרף השוואה: יעד מול המסלולים שנבחרו")
+labels_order = ["מניות", "אלטרנטיבי", 'מט"ח']
+rad_cols = st.columns(3)
+for i in range(min(3, len(best))):
+    r = best.iloc[i].to_dict()
+    row_dict = {k: float(r[k]) for k in labels_order}
+    fig = make_radar(f"{r['גוף']} — יעד מול מסלול", target, row_dict, labels_order)
+    rad_cols[i].plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# Scenario comparison table (Top3 per scenario)
+# -----------------------------
+st.subheader("השוואת תרחישים (Top 3 לכל תרחיש)")
+scenarios = st.session_state["scenarios"]
+if not scenarios:
+    st.caption("אין עדיין תרחישים שמורים. שמור תרחיש בצד כדי להשוות.")
+else:
+    comp_rows = []
+    for scen_name, payload in scenarios.items():
+        t = payload["target"]
+        w = payload["weights"]
+
+        tmp = df2_base.copy()
+        # same filters for fairness? we'll apply current filters too (search/min thresholds)
+        if search.strip():
+            tmp = tmp[tmp["גוף"].str.contains(search.strip(), case=False, na=False)]
+        tmp = tmp[tmp["שארפ"] >= min_sharpe]
+        tmp = tmp[tmp["נכסים סחירים"] >= min_liquid]
+        tmp = tmp[tmp["נכסים בארץ"] >= min_israel]
+        if tmp.empty:
+            comp_rows.append({"תרחיש": scen_name, "תוצאה": "אין תוצאות (פילטרים)", "מקום 1": "", "מקום 2": "", "מקום 3": ""})
+            continue
+
+        tmp["מרחק מניות"] = (tmp["מניות"] - t["מניות"]).abs()
+        tmp["מרחק אלטרנטיבי"] = (tmp["אלטרנטיבי"] - t["אלטרנטיבי"]).abs()
+        tmp['מרחק מט"ח'] = (tmp['מט"ח'] - t['מט"ח']).abs()
+        sh_ref2 = float(tmp["שארפ"].max()) if len(tmp) else 1.0
+        tmp["קנס שארפ"] = (sh_ref2 - tmp["שארפ"]).clip(lower=0)
+
+        tmp["ציון"] = (
+            w["w_equity"] * tmp["מרחק מניות"]
+            + w["w_alt"] * tmp["מרחק אלטרנטיבי"]
+            + w["w_fx"] * tmp['מרחק מט"ח']
+            + w["w_sharpe"] * tmp["קנס שארפ"] * 10.0
+        )
+
+        top3 = tmp.sort_values("ציון").head(3)["גוף"].tolist()
+        while len(top3) < 3:
+            top3.append("")
+
+        comp_rows.append({
+            "תרחיש": scen_name,
+            "יעד מניות": t["מניות"],
+            "יעד אלטרנטיבי": t["אלטרנטיבי"],
+            'יעד מט"ח': t['מט"ח'],
+            "משקל מניות": w["w_equity"],
+            "משקל אלטרנטיבי": w["w_alt"],
+            'משקל מט"ח': w["w_fx"],
+            "משקל שארפ": w["w_sharpe"],
+            "מקום 1": top3[0],
+            "מקום 2": top3[1],
+            "מקום 3": top3[2],
+        })
+
+    comp = pd.DataFrame(comp_rows)
+    st.dataframe(comp, use_container_width=True)
+
+st.caption("אם תרצה: אני יכול להפוך את 'טען תרחיש' לכפתור שממש מעדכן את הסליידרים אוטומטית (עם keys) — תגיד לי וזהו.")
